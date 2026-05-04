@@ -99,6 +99,8 @@ Output saat server berhasil berjalan:
 | 20    | 200 liter |
 
 > **Aturan valve:** Katup air otomatis **terbuka** jika `saldo > 0` dan **tertutup** jika `saldo ≤ 0`.
+>
+> **Aturan low balance:** Sistem menganggap saldo hampir habis jika `saldo <= 5` untuk endpoint customer. Pada response ke ESP32, field `low_balance: true` dikirim saat saldo turun ke bawah `5`.
 
 ---
 
@@ -176,6 +178,16 @@ Menerima data sensor dari perangkat ESP32 dan mengembalikan status valve yang ha
 }
 ```
 
+Jika saldo hasil update turun ke bawah `5`, backend juga mengirim:
+
+```json
+{
+  "valve": true,
+  "status": "ok",
+  "low_balance": true
+}
+```
+
 ---
 
 #### `POST /api/esp32/token`
@@ -233,6 +245,7 @@ GET /api/customer/P001
   "nama": "Budi Santoso",
   "alamat": "Jl. Merdeka No.12",
   "saldo": 45.5,
+  "low_balance": false,
   "volume": 120.3,
   "flowRate": 0,
   "valve": true,
@@ -248,6 +261,12 @@ GET /api/customer/P001
   ]
 }
 ```
+
+Keterangan field tambahan:
+
+| Field | Tipe | Keterangan |
+|-------|------|------------|
+| `low_balance` | boolean | `true` jika `saldo <= 5`, `false` jika `saldo > 5` |
 
 **Response — Pelanggan Tidak Ditemukan `404`**
 
