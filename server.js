@@ -196,7 +196,13 @@ app.post('/api/esp32/data', (req, res) => {
   // Valve buka jika saldo > 0, tutup jika habis
   customer.valve = customer.saldo > 0;
 
-  res.json({ valve: customer.valve, status: 'ok' });
+  const lowBalance = customer.saldo < 5;
+
+  res.json({
+    valve: customer.valve,
+    status: 'ok',
+    ...(lowBalance ? { low_balance: true } : {})
+  });
 });
 
 /**
@@ -243,6 +249,7 @@ app.get('/api/customer/:id', (req, res) => {
     nama:       customer.nama,
     alamat:     customer.alamat,
     saldo:      customer.saldo,
+    low_balance: customer.saldo <= 5,
     volume:     customer.volume,
     flowRate:   customer.flowRate,
     valve:      customer.valve,
