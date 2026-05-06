@@ -17,44 +17,24 @@ app.use(express.json());   // parse body JSON
 //  IN-MEMORY DATA STORE
 // ============================================================
 
-// Data master pelanggan
+// Data master pelanggan — hanya pelanggan aktif terhubung ESP32
 const customers = {
   P001: {
     nama:       'Budi Santoso',
     alamat:     'Jl. Merdeka No.12',
     saldo:      45.5,
-    volume:     120.3,   // total liter yang sudah mengalir
-    flowRate:   0,       // liter/menit saat ini
+    volume:     0,
+    flowRate:   0,
     valve:      true,
     lastUpdate: new Date().toISOString(),
-    history:    []       // riwayat topup
+    history:    []
   },
   P002: {
     nama:       'Siti Rahayu',
     alamat:     'Jl. Sudirman No.5',
     saldo:      12.0,
-    volume:     340.7,
-    flowRate:   2.1,
-    valve:      true,
-    lastUpdate: new Date().toISOString(),
-    history:    []
-  },
-  P003: {
-    nama:       'Ahmad Fauzi',
-    alamat:     'Jl. Diponegoro No.88',
-    saldo:      0,
-    volume:     89.1,
+    volume:     0,
     flowRate:   0,
-    valve:      false,   // saldo 0 → katup tutup
-    lastUpdate: new Date().toISOString(),
-    history:    []
-  },
-  P004: {
-    nama:       'Dewi Lestari',
-    alamat:     'Jl. Pahlawan No.3',
-    saldo:      78.2,
-    volume:     210.5,
-    flowRate:   1.3,
     valve:      true,
     lastUpdate: new Date().toISOString(),
     history:    []
@@ -73,39 +53,40 @@ const usedTokens = new Set();
 // Token yang di-generate admin: token → nilai saldo
 const adminTokens = {};
 
-// Data pemakaian harian per pelanggan (di-generate saat server start)
+// Pemakaian harian real — diisi dari data ESP32 saat server berjalan
 const dailyUsage = {};
 
-// ============================================================
-//  GENERATE DUMMY DAILY USAGE (7 hari ke belakang)
-// ============================================================
-
-function generateDummyDailyUsage() {
+function initDailyUsage() {
   const today = new Date();
 
   Object.keys(customers).forEach((pid) => {
     dailyUsage[pid] = [];
-
     for (let i = 6; i >= 0; i--) {
       const d = new Date(today);
       d.setDate(d.getDate() - i);
-      const tanggal = d.toISOString().split('T')[0];
-
-      // Volume harian acak 5–35 liter, 0 jika pelanggan nonaktif (P003)
-      const isActive  = customers[pid].valve || i > 0; // hari sebelumnya bisa saja aktif
-      const volume    = isActive
-        ? parseFloat((Math.random() * 30 + 5).toFixed(1))
-        : 0;
-      const saldoTerpakai = parseFloat((volume / 10).toFixed(2));
-
-      dailyUsage[pid].push({ tanggal, volume, saldo_terpakai: saldoTerpakai });
+      dailyUsage[pid].push({
+        tanggal:        d.toISOString().split('T')[0],
+        volume:         0,
+        saldo_terpakai: 0,
+      });
     }
   });
 
-  console.log('📅 Daily usage (7 hari) berhasil di-generate');
+  console.log('📅 Daily usage tracking diinisialisasi (data real dari ESP32)');
 }
 
-generateDummyDailyUsage();
+initDailyUsage();
+
+// Tambah volume ke pemakaian hari ini untuk pelanggan tertentu
+function catatPemakaianHariIni(pelangganId, deltaVolume) {
+  if (!dailyUsage[pelangganId]) return;
+  const hariIni = new Date().toISOString().split('T')[0];
+  const entry   = dailyUsage[pelangganId].find((d) => d.tanggal === hariIni);
+  if (entry) {
+    entry.volume         = parseFloat((entry.volume + deltaVolume).toFixed(1));
+    entry.saldo_terpakai = parseFloat((entry.volume / 10).toFixed(2));
+  }
+}
 
 // ============================================================
 //  HELPER: Validasi & Proses Token
@@ -175,7 +156,7 @@ function processToken(pelangganId, token) {
  * Server menjadi sumber kebenaran valve berdasarkan saldo tersebut.
  */
 app.post('/api/esp32/data', (req, res) => {
-  const { pelanggan_id, saldo, volume, flowRate } = req.body;
+  const { pelanggan_id, volume, flowRate } = req.body;
 
   if (!pelanggan_id) {
     return res.status(400).json({ error: 'pelanggan_id diperlukan' });
@@ -186,21 +167,34 @@ app.post('/api/esp32/data', (req, res) => {
     return res.status(404).json({ error: 'Pelanggan tidak ditemukan' });
   }
 
-  // Update field yang dikirim ESP32 (undefined artinya tidak dikirim, skip)
-  if (saldo    !== undefined) customer.saldo    = parseFloat(Number(saldo).toFixed(2));
-  if (volume   !== undefined) customer.volume   = parseFloat(Number(volume).toFixed(1));
+  // Hitung saldo dari delta volume (server jadi sumber kebenaran saldo)
+  // Jika volume ESP32 naik → kurangi saldo sesuai selisih (10 liter = 1 saldo)
+  if (volume !== undefined) {
+    const newVolume = parseFloat(Number(volume).toFixed(1));
+    if (customer.volume === 0) {
+      // Pertama kali data masuk setelah server start — jadikan baseline, jangan hitung delta
+      customer.volume = newVolume;
+    } else if (newVolume > customer.volume) {
+      const delta       = newVolume - customer.volume;
+      const saldoKurang = parseFloat((delta / 10).toFixed(4));
+      customer.saldo    = Math.max(0, parseFloat((customer.saldo - saldoKurang).toFixed(2)));
+      // Catat pemakaian real hari ini untuk grafik
+      catatPemakaianHariIni(pelanggan_id, delta);
+      customer.volume = newVolume;
+    }
+  }
+
   if (flowRate !== undefined) customer.flowRate = parseFloat(Number(flowRate).toFixed(2));
 
   customer.lastUpdate = new Date().toISOString();
-
-  // Valve buka jika saldo > 0, tutup jika habis
-  customer.valve = customer.saldo > 0;
+  customer.valve      = customer.saldo > 0;
 
   const lowBalance = customer.saldo < 5;
 
   res.json({
-    valve: customer.valve,
+    valve:  customer.valve,
     status: 'ok',
+    saldo:  customer.saldo,
     ...(lowBalance ? { low_balance: true } : {})
   });
 });
@@ -302,9 +296,9 @@ app.get('/api/admin/dashboard', (req, res) => {
     lastUpdate: data.lastUpdate
   }));
 
-  // Hitung ringkasan
-  const totalAktif    = daftarPelanggan.filter((p) => p.valve).length;
-  const totalNonaktif = daftarPelanggan.filter((p) => !p.valve).length;
+  // Hitung ringkasan — aktif/nonaktif berdasarkan saldo (sesuai logika ESP32)
+  const totalAktif    = daftarPelanggan.filter((p) => p.saldo > 0).length;
+  const totalNonaktif = daftarPelanggan.filter((p) => p.saldo <= 0).length;
 
   // Agregat volume hari ini dari daily usage
   const hariIni = new Date().toISOString().split('T')[0];
@@ -428,6 +422,96 @@ app.post('/api/admin/valve', (req, res) => {
     valve,
     message: `Valve pelanggan ${pelanggan_id} berhasil di${valve ? 'buka' : 'tutup'} oleh admin`
   });
+});
+
+/**
+ * POST /api/admin/reset-saldo
+ * Reset saldo pelanggan ke 0 dan tutup valve.
+ * Body : { pelanggan_id }
+ */
+app.post('/api/admin/reset-saldo', (req, res) => {
+  const { pelanggan_id } = req.body;
+
+  if (!pelanggan_id) {
+    return res.status(400).json({ error: 'pelanggan_id diperlukan' });
+  }
+
+  const customer = customers[pelanggan_id];
+  if (!customer) {
+    return res.status(404).json({ error: 'Pelanggan tidak ditemukan' });
+  }
+
+  customer.saldo      = 0;
+  customer.valve      = false;
+  customer.lastUpdate = new Date().toISOString();
+
+  res.json({
+    pelanggan_id,
+    saldo: 0,
+    valve: false,
+    message: `Saldo pelanggan ${pelanggan_id} berhasil direset ke 0`
+  });
+});
+
+/**
+ * POST /api/admin/reset-volume-hari-ini
+ * Reset volume hari ini ke 0 untuk semua pelanggan.
+ */
+app.post('/api/admin/reset-volume-hari-ini', (req, res) => {
+  const hariIni = new Date().toISOString().split('T')[0];
+
+  Object.keys(dailyUsage).forEach((pid) => {
+    const entry = dailyUsage[pid].find((d) => d.tanggal === hariIni);
+    if (entry) {
+      entry.volume         = 0;
+      entry.saldo_terpakai = 0;
+    }
+  });
+
+  res.json({ message: 'Volume hari ini berhasil direset ke 0', tanggal: hariIni });
+});
+
+/**
+ * POST /api/admin/set-saldo
+ * Set saldo pelanggan ke nilai tertentu.
+ * Body : { pelanggan_id, saldo }
+ */
+app.post('/api/admin/set-saldo', (req, res) => {
+  const { pelanggan_id, saldo } = req.body;
+
+  if (!pelanggan_id || saldo === undefined) {
+    return res.status(400).json({ error: 'pelanggan_id dan saldo diperlukan' });
+  }
+
+  const customer = customers[pelanggan_id];
+  if (!customer) {
+    return res.status(404).json({ error: 'Pelanggan tidak ditemukan' });
+  }
+
+  customer.saldo      = parseFloat(Number(saldo).toFixed(2));
+  customer.valve      = customer.saldo > 0;
+  customer.lastUpdate = new Date().toISOString();
+
+  res.json({
+    pelanggan_id,
+    saldo: customer.saldo,
+    valve: customer.valve,
+    message: `Saldo pelanggan ${pelanggan_id} berhasil diset ke ${customer.saldo}`
+  });
+});
+
+/**
+ * POST /api/admin/reset-saldo-semua
+ * Reset saldo semua pelanggan ke 0 dan tutup semua valve.
+ */
+app.post('/api/admin/reset-saldo-semua', (req, res) => {
+  Object.keys(customers).forEach((pid) => {
+    customers[pid].saldo      = 0;
+    customers[pid].valve      = false;
+    customers[pid].lastUpdate = new Date().toISOString();
+  });
+
+  res.json({ message: 'Saldo semua pelanggan berhasil direset ke 0', total_saldo_beredar: 0 });
 });
 
 // ============================================================
