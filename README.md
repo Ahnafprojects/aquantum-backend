@@ -1,24 +1,113 @@
+# Aquantum — Sistem PDAM Prepaid
+
+Repositori ini berisi **backend API** dan **firmware ESP32** untuk sistem PDAM Prepaid **Aquantum**.
+
+| Komponen | Teknologi | Peran |
+|----------|-----------|-------|
+| `aquantum-backend` | Node.js + Express | REST API, manajemen saldo & token |
+| `aquantum-esp32` | Arduino / ESP32 | Baca flow sensor, kontrol valve, kirim data |
+| `aquacontrol` | Next.js | Dashboard admin |
+| `aquallet` | Next.js | Aplikasi pelanggan |
+
+---
+
+## Daftar Isi
+
+- [Langkah Cepat Menjalankan Sistem](#langkah-cepat-menjalankan-sistem)
+- [Aquantum Backend](#aquantum-backend)
+  - [Persyaratan](#persyaratan)
+  - [Instalasi](#instalasi)
+  - [Konfigurasi](#konfigurasi)
+  - [Menjalankan Server](#menjalankan-server)
+  - [Konversi Saldo](#konversi-saldo)
+  - [Sistem Token](#sistem-token)
+  - [Data Pelanggan](#data-pelanggan)
+  - [Dokumentasi API](#dokumentasi-api)
+  - [Contoh Request & Response](#contoh-request--response)
+- [Aquantum ESP32 — Firmware](#aquantum-esp32--firmware)
+  - [Gambaran Umum ESP32](#gambaran-umum-esp32)
+  - [Komponen Hardware](#komponen-hardware)
+  - [Wiring / Skema Koneksi](#wiring--skema-koneksi)
+  - [Instalasi Library Arduino](#instalasi-library-arduino)
+  - [Konfigurasi Firmware](#konfigurasi-firmware)
+  - [Cara Upload ke ESP32](#cara-upload-ke-esp32)
+  - [Cara Kerja Firmware](#cara-kerja-firmware)
+  - [Token & Saldo di Firmware](#token--saldo-di-firmware)
+  - [Mode Offline](#mode-offline)
+  - [Troubleshooting ESP32](#troubleshooting-esp32)
+
+---
+
+## Langkah Cepat Menjalankan Sistem
+
+Ikuti urutan ini setiap kali ingin menjalankan seluruh sistem dari awal.
+
+**1. Pastikan semua perangkat terhubung ke WiFi yang sama**
+
+Laptop dan ESP32 harus berada di jaringan WiFi yang sama. Contoh: hotspot HP `OPPO A78`.
+
+**2. Cari tahu IP laptop saat ini**
+
+```bash
+# Mac / Linux
+ipconfig getifaddr en0
+
+# Windows (Command Prompt)
+ipconfig
+# Lihat "IPv4 Address" di bagian adapter WiFi
+```
+
+Contoh hasil: `10.201.138.14`
+
+**3. Isi konfigurasi di `aquantum-esp32.ino` lalu upload**
+
+Edit 4 baris berikut di bagian atas file `.ino`:
+
+```cpp
+const char*   WIFI_SSID    = "OPPO A78";
+const char*   WIFI_PASS    = "passwordwifi";
+const char*   SERVER_URL   = "http://10.201.138.14:3000"; // IP laptop dari langkah 2
+const String  PELANGGAN_ID = "P001";
+```
+
+Upload ke ESP32 via Arduino IDE (lihat [Cara Upload ke ESP32](#cara-upload-ke-esp32)).
+
+> **IP laptop bisa berubah** setiap ganti jaringan WiFi. Ulangi langkah 2–3 setiap kali ganti hotspot.
+
+**4. Jalankan backend dan aplikasi web**
+
+Buka tiga terminal terpisah:
+
+```bash
+# Terminal 1 — Backend (wajib jalan duluan)
+cd aquantum-backend && npm run dev
+
+# Terminal 2 — Dashboard Admin
+cd aquacontrol && npm run dev
+
+# Terminal 3 — Aplikasi Pelanggan
+cd aquallet && npm run dev
+```
+
+**5. Buka di browser**
+
+| Aplikasi | URL | Login |
+|----------|-----|-------|
+| AquaControl (admin) | `http://localhost:3001` | `admin` / `pdam2024` |
+| Aquallet (pelanggan) | `http://localhost:3002` | ID: `P001` atau `P002` |
+
+**6. Verifikasi koneksi ESP32**
+
+Buka AquaControl. Kolom **Last Update** pada tabel pelanggan akan berubah setiap ~1 detik, menandakan ESP32 sudah terhubung dan mengirim data.
+
+---
+
 # Aquantum Backend
 
 REST API untuk sistem PDAM Prepaid **Aquantum** berbasis Node.js + Express.  
 Data disimpan sepenuhnya di memory — tidak memerlukan database.
 
 ---
-
-## Daftar Isi
-
-- [Persyaratan](#persyaratan)
-- [Instalasi](#instalasi)
-- [Konfigurasi](#konfigurasi)
-- [Menjalankan Server](#menjalankan-server)
-- [Konversi Saldo](#konversi-saldo)
-- [Sistem Token](#sistem-token)
-- [Data Pelanggan](#data-pelanggan)
-- [Dokumentasi API](#dokumentasi-api)
-  - [ESP32 Endpoints](#esp32-endpoints)
-  - [Customer Endpoints](#customer-endpoints)
-  - [Admin Endpoints](#admin-endpoints)
-- [Contoh Request & Response](#contoh-request--response)
 
 ---
 
@@ -539,3 +628,171 @@ curl -X POST http://localhost:3000/api/admin/reset-volume-hari-ini
 # Reset saldo semua pelanggan ke 0
 curl -X POST http://localhost:3000/api/admin/reset-saldo-semua
 ```
+
+---
+
+# Aquantum ESP32 — Firmware
+
+Firmware Arduino untuk perangkat **Aquantum** berbasis ESP32. Mengukur debit dan volume air via flow sensor, lalu mengirim data ke backend secara real-time lewat WiFi.
+
+---
+
+## Gambaran Umum ESP32
+
+```
+┌────────────────────────────────────────────────┐
+│               AQUANTUM DEVICE                  │
+│                                                │
+│  Flow Sensor ──► ESP32 ──► WiFi ──► Backend    │
+│                                 (port 3000)    │
+└────────────────────────────────────────────────┘
+```
+
+ESP32 berperan sebagai:
+1. **Pengukur** — membaca pulsa flow sensor untuk menghitung debit (L/menit) dan volume (liter)
+2. **Controller** — mengontrol valve berdasarkan instruksi backend (buka/tutup sesuai saldo)
+3. **Pengirim data** — mengirim data sensor ke backend setiap 1 detik via HTTP POST
+
+---
+
+## Komponen Hardware
+
+| Komponen | Spesifikasi | Qty |
+|----------|-------------|-----|
+| ESP32 DevKit | 38-pin dev board | 1 |
+| Flow Sensor | YF-S201 | 1 |
+| Kabel jumper | Male-to-male / male-female | secukupnya |
+
+---
+
+## Wiring / Skema Koneksi
+
+### Flow Sensor YF-S201
+
+| Kabel Sensor | Pin ESP32 |
+|--------------|-----------|
+| Merah (VCC) | 5V |
+| Hitam (GND) | GND |
+| Kuning (Signal) | GPIO 27 |
+
+---
+
+## Instalasi Library Arduino
+
+Buka Arduino IDE → **Tools → Manage Libraries** (`Ctrl+Shift+I`), lalu install:
+
+| Library | Author | Versi |
+|---------|--------|-------|
+| `ArduinoJson` | Benoit Blanchon | **6.x** |
+
+---
+
+## Konfigurasi Firmware
+
+Edit 4 baris berikut di bagian paling atas file `aquantum-esp32.ino`:
+
+```cpp
+const char*   WIFI_SSID    = "NamaWiFi";
+const char*   WIFI_PASS    = "PasswordWiFi";
+const char*   SERVER_URL   = "http://10.201.138.14:3000"; // IP laptop + port backend
+const String  PELANGGAN_ID = "P001";                      // ID pelanggan di sistem
+```
+
+| Parameter | Keterangan |
+|-----------|-----------|
+| `WIFI_SSID` | Nama hotspot / WiFi yang digunakan |
+| `WIFI_PASS` | Password WiFi |
+| `SERVER_URL` | `http://` + IP laptop + `:3000` — IP diperoleh dari `ipconfig getifaddr en0` (Mac) atau `ipconfig` (Windows) |
+| `PELANGGAN_ID` | ID pelanggan yang terdaftar di backend (`P001` atau `P002`) |
+
+> **Penting:** IP laptop bisa berubah setiap kali berganti jaringan WiFi. Perbarui `SERVER_URL` lalu upload ulang ke ESP32.
+
+---
+
+## Cara Upload ke ESP32
+
+1. Hubungkan ESP32 ke laptop via kabel USB
+2. Arduino IDE → **Tools → Board** → pilih `ESP32 Dev Module`
+3. **Tools → Port** → pilih port yang sesuai (`COMx` di Windows, `/dev/tty.usbserial-xxx` di Mac)
+4. Edit konfigurasi `WIFI_SSID`, `WIFI_PASS`, dan `SERVER_URL`
+5. Klik tombol **Upload** (ikon panah →)
+6. Tunggu hingga muncul `Done uploading`
+7. Buka **Serial Monitor** (baud rate `115200`) untuk melihat log koneksi WiFi
+
+---
+
+## Cara Kerja Firmware
+
+```
+[BOOT]
+  └─► Inisialisasi Flow Sensor (GPIO 27)
+  └─► Koneksi WiFi (timeout 10 detik / 20 percobaan)
+        ├─ Berhasil → lanjut kirim data ke backend
+        └─ Gagal   → mode offline aktif, tetap jalan
+
+[LOOP — berjalan terus-menerus]
+
+  Setiap 1 detik:
+    └─► Baca pulsa flow sensor
+    └─► Hitung flowRate (liter/menit) & volume (liter)
+    └─► Kurangi saldo lokal: setiap 10L → 1 saldo berkurang
+    └─► POST /api/esp32/data  →  terima instruksi valve (true/false)
+
+  Saat token disubmit:
+    └─► Validasi token lokal (1111 atau 4444)
+    └─► Jika valid → tambah saldo lokal
+    └─► POST /api/esp32/token  →  server catat one-time use
+```
+
+ESP32 membaca field `valve` dari response backend:
+- `true` → biarkan air mengalir (valve terbuka)
+- `false` → valve ditutup (saldo habis)
+
+---
+
+## Token & Saldo di Firmware
+
+### Konversi Saldo ke Air
+
+| Saldo | Air |
+|-------|-----|
+| 1 | 10 liter |
+| 10 | 100 liter |
+| 20 | 200 liter |
+
+Saldo berkurang otomatis: setiap **10 liter** air mengalir, **1 saldo** terpotong.
+
+### Token Preset (built-in di firmware)
+
+| Kode | Saldo Ditambah | Setara Air |
+|------|----------------|------------|
+| `1111` | +10 saldo | +100 liter |
+| `4444` | +20 saldo | +200 liter |
+
+Token diproses secara lokal di ESP32, lalu dilaporkan ke backend via `POST /api/esp32/token` untuk dicatat sebagai one-time use.
+
+---
+
+## Mode Offline
+
+Jika WiFi tidak tersedia atau terputus di tengah jalan:
+
+- ESP32 **tetap berjalan normal** — flow sensor tetap aktif mengukur
+- Token lokal (`1111` / `4444`) tetap dapat digunakan untuk menambah saldo secara lokal
+- Data **tidak dikirim** ke backend selama offline
+- Begitu WiFi terhubung kembali, pengiriman data real-time otomatis berlanjut
+
+> Data yang terlewat selama offline **tidak dikirim ulang** — hanya data real-time saat koneksi aktif yang terkirim.
+
+---
+
+## Troubleshooting ESP32
+
+| Masalah | Kemungkinan Penyebab | Solusi |
+|---------|----------------------|--------|
+| WiFi gagal konek | SSID / password salah | Periksa `WIFI_SSID` dan `WIFI_PASS` |
+| Data tidak masuk ke backend | IP backend berubah | Cek IP laptop terbaru, perbarui `SERVER_URL`, upload ulang |
+| Backend tidak merespons | Backend belum jalan | Jalankan `npm run dev` di folder `aquantum-backend` |
+| Token diterima lokal tapi ditolak server | Token sudah pernah dipakai | Generate token baru dari AquaControl |
+| Volume tidak bertambah | Flow sensor tidak terbaca | Periksa wiring GPIO 27, pastikan ada aliran air |
+| Serial Monitor kosong | Baud rate salah | Set ke `115200` |
